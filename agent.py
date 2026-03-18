@@ -109,7 +109,10 @@ Look at the image carefully. Think step by step. Give your final answer in the e
         is_counting = any(w in q_lower for w in ["how many", "count"])
 
         if is_counting:
-            # Counting: multi-turn analysis then 5-sample majority vote
+            # Counting: combine multi-turn analysis + old dual-prompt, majority vote
+            all_answers = []
+
+            # Approach 1: Multi-turn systematic counting (3 samples)
             count_msgs = [
                 {"role": "user", "content": [
                     img_url,
@@ -123,17 +126,38 @@ Look at the image carefully. Think step by step. Give your final answer in the e
             count_msgs.append({"role": "assistant", "content": analysis})
             count_msgs.append({"role": "user", "content": "Now count your list carefully and give the total. Put ONLY the number on the last line."})
 
-            answers = []
-            for _ in range(5):
+            for _ in range(3):
                 resp = client.chat.completions.create(
                     model=model, messages=count_msgs, temperature=0.3, max_completion_tokens=256,
                 )
-                a = extract_answer(resp.choices[0].message.content.strip(), ans_type)
-                answers.append(a)
+                all_answers.append(extract_answer(resp.choices[0].message.content.strip(), ans_type))
 
-            counts = Counter(answers)
+            # Approach 2: Direct prompts with detail:high (2 samples)
+            resp_a = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_a}]}],
+                temperature=0.1,
+                max_completion_tokens=1024,
+            )
+            all_answers.append(extract_answer(resp_a.choices[0].message.content.strip(), ans_type))
+
+            prompt_count = f"""Image description: {description}
+
+{question}
+
+IMPORTANT: Before giving your count, list each item you're counting with its approximate position (e.g., "row 1: item at col 2, item at col 5"). Then total them up.
+Put ONLY the final count number on the last line."""
+            resp_b = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_count}]}],
+                temperature=0.1,
+                max_completion_tokens=1024,
+            )
+            all_answers.append(extract_answer(resp_b.choices[0].message.content.strip(), ans_type))
+
+            counts = Counter(all_answers)
             answer = counts.most_common(1)[0][0]
-            raw_output = f"samples={answers} picked={answer}"
+            raw_output = f"samples={all_answers} picked={answer}"
         else:
             prompt_b = f"""Here is a detailed description of the image:
 {description}
