@@ -98,14 +98,13 @@ def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
 
     model = os.environ.get("SOLVER_MODEL", "gpt-5.4-mini")
 
-    # Description (returns empty with detail:high + 512, acts as conversation seed)
+    # Skip description API call (always returns empty with detail:high + 512 tokens)
+    # Keep desc_messages as conversation seed for multi-turn
+    description = "(no description available)"
     desc_messages = [{"role": "user", "content": [
         hi_url,
         {"type": "text", "text": "Describe this image in detail. Focus on: the layout/grid structure, all visual elements (shapes, colors, patterns, numbers, letters), positions of elements, any differences or similarities between elements, and any spatial relationships. Be thorough and precise."},
     ]}]
-    description = api_call(client, model, desc_messages, temperature=0, max_tokens=512)
-    if not description:
-        description = "(no description available)"
 
     if ans_type == "choice" and options:
         answer, raw_output = solve_choice(client, model, question, options, description, img_url, desc_messages)
