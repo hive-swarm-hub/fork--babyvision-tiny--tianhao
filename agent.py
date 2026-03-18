@@ -50,10 +50,16 @@ def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
         max_completion_tokens=512,
     )
     description = desc_response.choices[0].message.content
-    if description:
-        description = description.strip()
-    else:
-        description = "(no description available)"
+    if not description or not description.strip():
+        # Retry with shorter prompt when content is None (happens on token limit hit)
+        desc_response = client.chat.completions.create(
+            model=model,
+            messages=describe_messages,
+            temperature=0,
+            max_completion_tokens=300,
+        )
+        description = desc_response.choices[0].message.content
+    description = description.strip() if description else "(no description available)"
 
     # Step 2: Answer
     if ans_type == "choice" and options:
