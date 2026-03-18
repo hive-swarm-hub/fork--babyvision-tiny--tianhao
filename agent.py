@@ -10,6 +10,7 @@ import json
 import base64
 import re
 import io
+from collections import Counter
 
 from openai import OpenAI
 from PIL import Image
@@ -105,13 +106,34 @@ Image analysis notes:
 Look at the image carefully. Think step by step. Give your final answer in the exact format requested. Put ONLY the answer value on the last line."""
 
         q_lower = question.lower()
-        if any(w in q_lower for w in ["how many", "count"]):
-            prompt_b = f"""Image description: {description}
+        is_counting = any(w in q_lower for w in ["how many", "count"])
 
-{question}
+        if is_counting:
+            # Counting: multi-turn analysis then 5-sample majority vote
+            count_msgs = [
+                {"role": "user", "content": [
+                    img_url,
+                    {"type": "text", "text": f"Look at this image carefully.\n\n{question}\n\nFirst, systematically locate and list each item you need to count, with its position (e.g., row and column). Be thorough — scan every row and column."},
+                ]},
+            ]
+            analysis_resp = client.chat.completions.create(
+                model=model, messages=count_msgs, temperature=0, max_completion_tokens=1024,
+            )
+            analysis = analysis_resp.choices[0].message.content or ""
+            count_msgs.append({"role": "assistant", "content": analysis})
+            count_msgs.append({"role": "user", "content": "Now count your list carefully and give the total. Put ONLY the number on the last line."})
 
-IMPORTANT: Before giving your count, list each item you're counting with its approximate position (e.g., "row 1: item at col 2, item at col 5"). Then total them up.
-Put ONLY the final count number on the last line."""
+            answers = []
+            for _ in range(5):
+                resp = client.chat.completions.create(
+                    model=model, messages=count_msgs, temperature=0.3, max_completion_tokens=256,
+                )
+                a = extract_answer(resp.choices[0].message.content.strip(), ans_type)
+                answers.append(a)
+
+            counts = Counter(answers)
+            answer = counts.most_common(1)[0][0]
+            raw_output = f"samples={answers} picked={answer}"
         else:
             prompt_b = f"""Here is a detailed description of the image:
 {description}
@@ -121,29 +143,28 @@ Now answer this question about the image:
 
 Think step by step, then give your final answer in the exact format requested. Put your final answer on the last line, with ONLY the answer value and nothing else."""
 
-        resp_a = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_a}]}],
-            temperature=0.1,
-            max_completion_tokens=1024,
-        )
-        answer_a = extract_answer(resp_a.choices[0].message.content.strip(), ans_type)
+            resp_a = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_a}]}],
+                temperature=0.1,
+                max_completion_tokens=1024,
+            )
+            answer_a = extract_answer(resp_a.choices[0].message.content.strip(), ans_type)
 
-        resp_b = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_b}]}],
-            temperature=0.1,
-            max_completion_tokens=1024,
-        )
-        answer_b = extract_answer(resp_b.choices[0].message.content.strip(), ans_type)
+            resp_b = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_b}]}],
+                temperature=0.1,
+                max_completion_tokens=1024,
+            )
+            answer_b = extract_answer(resp_b.choices[0].message.content.strip(), ans_type)
 
-        if answer_a == answer_b:
-            answer = answer_a
-            raw_output = resp_a.choices[0].message.content.strip()
-        else:
-            # When answers disagree, prefer prompt A (question-first, better for counting)
-            answer = answer_a
-            raw_output = f"A={answer_a} B={answer_b} PICKED=A"
+            if answer_a == answer_b:
+                answer = answer_a
+                raw_output = resp_a.choices[0].message.content.strip()
+            else:
+                answer = answer_a
+                raw_output = f"A={answer_a} B={answer_b} PICKED=A"
 
     # Save trajectory
     traj_dir = os.environ.get("EVAL_TRAJECTORY_DIR")
