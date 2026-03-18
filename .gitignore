@@ -8,3 +8,4 @@ run2.log
 run.log
 results.tsv
 eval_results/
+run_*.log
