@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 data_path = sys.argv[1]
-max_workers = int(sys.argv[2]) if len(sys.argv) > 2 else 8
+max_workers = int(sys.argv[2]) if len(sys.argv) > 2 else 16
 
 with open(data_path) as f:
     tasks = [json.loads(line) for line in f]
