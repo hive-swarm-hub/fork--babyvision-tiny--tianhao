@@ -76,11 +76,15 @@ def api_call(client, model, messages, temperature=0, max_tokens=1024):
 def is_grid_counting(question):
     """Check if this is a grid-based counting problem suitable for grid transcription."""
     q = question.lower()
-    if not any(w in q for w in ["how many", "count"]):
+    if not any(w in q for w in ["how many", "count", "pass through"]):
         return False
+    # Grid squares/patterns
     if any(w in q for w in ["square", "pattern"]):
-        if any(w in q for w in ["3d", "block", "cube", "line", "pass through", "point"]):
+        if any(w in q for w in ["3d", "block", "cube"]):
             return False
+        return True
+    # Line through points (dot grid)
+    if "pass through" in q or ("point" in q and "line" in q):
         return True
     return False
 
