@@ -140,23 +140,9 @@ Think step by step, then give your final answer in the exact format requested. P
             answer = answer_a
             raw_output = resp_a.choices[0].message.content.strip()
         else:
-            # Adjudicate: ask the model to pick between the two answers
-            adj_prompt = f"""Question: {question}
-
-Two analyses produced different answers:
-Answer 1: {answer_a}
-Answer 2: {answer_b}
-
-Look at the image carefully. Which answer is correct? Reply with ONLY the correct answer value."""
-
-            adj_resp = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": [img_url, {"type": "text", "text": adj_prompt}]}],
-                temperature=0,
-                max_completion_tokens=64,
-            )
-            answer = extract_answer(adj_resp.choices[0].message.content.strip(), ans_type)
-            raw_output = f"A={answer_a} B={answer_b} ADJ={answer}"
+            # When answers disagree, prefer prompt A (question-first, better for counting)
+            answer = answer_a
+            raw_output = f"A={answer_a} B={answer_b} PICKED=A"
 
     # Save trajectory
     traj_dir = os.environ.get("EVAL_TRAJECTORY_DIR")
