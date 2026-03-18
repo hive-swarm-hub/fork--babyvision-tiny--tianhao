@@ -41,63 +41,91 @@ def extract_answer(raw_output, ans_type):
     return answer
 
 
+def extract_choice_letter(raw_output):
+    """Extract choice answer: letter -> 0-indexed."""
+    lines = [l.strip() for l in raw_output.split("\n") if l.strip()]
+    answer_line = lines[-1] if lines else raw_output
+    letter_map = {'A': '0', 'B': '1', 'C': '2', 'D': '3'}
+    m = re.search(r'\b([A-D])\b', answer_line)
+    if m and m.group(1) in letter_map:
+        return letter_map[m.group(1)]
+    m = re.search(r'\b([0-3])\b', answer_line)
+    if m:
+        return m.group(1)
+    for line in reversed(lines):
+        m = re.search(r'\b([A-D])\b', line)
+        if m and m.group(1) in letter_map:
+            return letter_map[m.group(1)]
+    return answer_line
+
+
+def api_call(client, model, messages, temperature=0, max_tokens=1024):
+    """API call with retry on empty."""
+    for _ in range(2):
+        resp = client.chat.completions.create(
+            model=model, messages=messages,
+            temperature=temperature, max_completion_tokens=max_tokens,
+        )
+        content = resp.choices[0].message.content
+        if content and content.strip():
+            return content.strip()
+    return ""
+
+
 def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
     client = OpenAI()
 
     img_b64 = load_image_b64(image_path)
     img_url = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
+    hi_url = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}", "detail": "high"}}
 
     model = os.environ.get("SOLVER_MODEL", "gpt-5.4-mini")
 
-    # Step 1: Describe the image (high detail for better perception)
-    hi_url = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}", "detail": "high"}}
-    desc_response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": [
-            hi_url,
-            {"type": "text", "text": "Describe this image in detail. Focus on: the layout/grid structure, all visual elements (shapes, colors, patterns, numbers, letters), positions of elements, any differences or similarities between elements, and any spatial relationships. Be thorough and precise."},
-        ]}],
-        temperature=0,
-        max_completion_tokens=512,
-    )
-    description = desc_response.choices[0].message.content
-    if not description or not description.strip():
-        desc_response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": [
-                hi_url,
-                {"type": "text", "text": "Describe this image in detail. Focus on layout, elements, positions, differences."},
-            ]}],
-            temperature=0,
-            max_completion_tokens=300,
-        )
-        description = desc_response.choices[0].message.content
-    description = description.strip() if description else "(no description available)"
+    # Step 1: Description (returns empty with detail:high + 512 tokens, acts as conversation seed)
+    desc_messages = [{"role": "user", "content": [
+        hi_url,
+        {"type": "text", "text": "Describe this image in detail. Focus on: the layout/grid structure, all visual elements (shapes, colors, patterns, numbers, letters), positions of elements, any differences or similarities between elements, and any spatial relationships. Be thorough and precise."},
+    ]}]
+    description = api_call(client, model, desc_messages, temperature=0, max_tokens=512)
+    if not description:
+        description = "(no description available)"
 
-    # Step 2: Two answer attempts with different prompt styles
     if ans_type == "choice" and options:
-        opts = "\n".join(f"{i+1}. {o}" for i, o in enumerate(options))
-        prompt_a = f"""Here is a detailed description of the image:
-{description}
+        # Choice: multi-turn with letter-based answers (junjie's approach)
+        n = len(options)
+        labels = ['A', 'B', 'C', 'D'][:n]
+        all_letters = all(len(o) == 1 and o in 'ABCD' for o in options)
 
-Now answer this question about the image:
+        messages = list(desc_messages)
+        messages.append({"role": "assistant", "content": description})
+
+        if all_letters:
+            answer_prompt = f"""Now answer this question about the image:
+{question}
+
+The options are shown in the image as {', '.join(labels)}.
+
+First, describe what you see in EACH option ({', '.join(labels)}) separately and in detail.
+Then, explain step by step which option is correct and why, comparing each option against the requirements.
+Finally, give your final answer as ONLY a single letter ({', '.join(labels)}) on the last line."""
+        else:
+            opts = "\n".join(f"{labels[i]}. {o}" for i, o in enumerate(options))
+            answer_prompt = f"""Now answer this question about the image:
 {question}
 
 Options:
 {opts}
 
-Think step by step, then give your final answer as ONLY the option number (1, 2, 3, or 4). Put your final answer on the last line."""
-        # For choice, just use one attempt (model bias is consistent)
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_a}]}],
-            temperature=0,
-            max_completion_tokens=1024,
-        )
-        raw_output = response.choices[0].message.content.strip()
-        answer = extract_answer(raw_output, ans_type)
+First, describe what you see for each option in detail.
+Then, explain step by step which option is correct and why.
+Finally, give your final answer as ONLY a single letter ({', '.join(labels)}) on the last line."""
+
+        messages.append({"role": "user", "content": [img_url, {"type": "text", "text": answer_prompt}]})
+        raw_output = api_call(client, model, messages, temperature=0, max_tokens=1500)
+        answer = extract_choice_letter(raw_output)
+
     else:
-        # For blank questions: try two different framings
+        # Blank questions
         prompt_a = f"""Question: {question}
 
 Image analysis notes:
@@ -109,7 +137,7 @@ Look at the image carefully. Think step by step. Give your final answer in the e
         is_counting = any(w in q_lower for w in ["how many", "count"])
 
         if is_counting:
-            # Counting: combine multi-turn analysis + old dual-prompt, majority vote
+            # Counting: combine multi-turn analysis + direct prompts, majority vote
             all_answers = []
 
             # Approach 1: Multi-turn systematic counting (3 samples)
@@ -119,10 +147,7 @@ Look at the image carefully. Think step by step. Give your final answer in the e
                     {"type": "text", "text": f"Look at this image carefully.\n\n{question}\n\nFirst, systematically locate and list each item you need to count, with its position (e.g., row and column). Be thorough — scan every row and column."},
                 ]},
             ]
-            analysis_resp = client.chat.completions.create(
-                model=model, messages=count_msgs, temperature=0, max_completion_tokens=1024,
-            )
-            analysis = analysis_resp.choices[0].message.content or ""
+            analysis = api_call(client, model, count_msgs, temperature=0, max_tokens=1024)
             count_msgs.append({"role": "assistant", "content": analysis})
             count_msgs.append({"role": "user", "content": "Now count your list carefully and give the total. Put ONLY the number on the last line."})
 
@@ -159,6 +184,7 @@ Put ONLY the final count number on the last line."""
             answer = counts.most_common(1)[0][0]
             raw_output = f"samples={all_answers} picked={answer}"
         else:
+            # Non-counting blank: dual prompts, prefer A
             prompt_b = f"""Here is a detailed description of the image:
 {description}
 
