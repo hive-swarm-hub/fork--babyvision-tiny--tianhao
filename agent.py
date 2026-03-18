@@ -230,39 +230,29 @@ Put ONLY the final count number on the last line."""
             answer = counts.most_common(1)[0][0]
             raw_output = f"samples={all_answers} picked={answer}"
         else:
-            # Non-counting blank: dual prompts, prefer A
-            prompt_b = f"""Here is a detailed description of the image:
-{description}
+            # Non-counting blank: multi-turn (like choice) + direct, prefer multi-turn
+            # Multi-turn: description context → answer
+            messages = list(desc_messages)
+            messages.append({"role": "assistant", "content": description})
+            messages.append({"role": "user", "content": [img_url, {"type": "text", "text": f"""{question}
 
-Now answer this question about the image:
-{question}
+Think step by step. Pay close attention to the exact format requested in the question.
+Give your final answer in the exact format requested. Put ONLY the answer value on the last line."""}]})
+            raw_a = api_call(client, model, messages, temperature=0, max_tokens=1024)
+            answer_a = extract_answer(raw_a, ans_type)
 
-Think step by step, then give your final answer in the exact format requested. Put your final answer on the last line, with ONLY the answer value and nothing else."""
-
-            resp_a = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_a}]}],
-                temperature=0.1,
-                max_completion_tokens=1024,
-                seed=42,
-            )
-            answer_a = extract_answer(resp_a.choices[0].message.content.strip(), ans_type)
-
-            resp_b = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_b}]}],
-                temperature=0.1,
-                max_completion_tokens=1024,
-                seed=42,
-            )
-            answer_b = extract_answer(resp_b.choices[0].message.content.strip(), ans_type)
+            # Direct prompt
+            raw_b = api_call(client, model,
+                [{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_a}]}],
+                temperature=0, max_tokens=1024)
+            answer_b = extract_answer(raw_b, ans_type)
 
             if answer_a == answer_b:
                 answer = answer_a
-                raw_output = resp_a.choices[0].message.content.strip()
+                raw_output = raw_a
             else:
                 answer = answer_a
-                raw_output = f"A={answer_a} B={answer_b} PICKED=A"
+                raw_output = f"A={answer_a} B={answer_b} PICKED=A(multi-turn)"
 
     # Save trajectory
     traj_dir = os.environ.get("EVAL_TRAJECTORY_DIR")
