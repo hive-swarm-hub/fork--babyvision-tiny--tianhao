@@ -9,15 +9,29 @@ import os
 import json
 import base64
 import re
+import io
 
 from openai import OpenAI
+from PIL import Image
+
+
+def load_image_b64(image_path: str, min_size: int = 768) -> str:
+    """Load image, upscale if too small, return base64."""
+    img = Image.open(image_path)
+    w, h = img.size
+    # Upscale small images so the model can see more detail
+    if max(w, h) < min_size:
+        scale = min_size / max(w, h)
+        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=95)
+    return base64.b64encode(buf.getvalue()).decode()
 
 
 def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
     client = OpenAI()
 
-    with open(image_path, "rb") as f:
-        img_b64 = base64.b64encode(f.read()).decode()
+    img_b64 = load_image_b64(image_path)
 
     model = os.environ.get("SOLVER_MODEL", "gpt-5.4-mini")
 
