@@ -57,14 +57,14 @@ def extract_choice_letter(raw_output):
 
 
 def api_call(client, model, messages, temperature=0, max_tokens=1024):
-    """API call with seed=42, retry on empty and rate limit backoff."""
+    """API call with retry on empty and rate limit backoff. seed=42 for temp=0 only."""
+    kwargs = dict(model=model, messages=messages,
+                  temperature=temperature, max_completion_tokens=max_tokens)
+    if temperature == 0:
+        kwargs["seed"] = 42
     for attempt in range(3):
         try:
-            resp = client.chat.completions.create(
-                model=model, messages=messages,
-                temperature=temperature, max_completion_tokens=max_tokens,
-                seed=42,
-            )
+            resp = client.chat.completions.create(**kwargs)
             content = resp.choices[0].message.content
             if content and content.strip():
                 return content.strip()
