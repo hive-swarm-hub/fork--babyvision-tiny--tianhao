@@ -55,19 +55,22 @@ def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
     else:
         description = "(no description available)"
 
-    # Step 2: Answer — question first, then description for context
+    # Step 2: Answer
     if ans_type == "choice" and options:
+        # Description-first for choice (preserves "2" bias which matches some answers)
         opts = "\n".join(f"{i+1}. {o}" for i, o in enumerate(options))
-        answer_prompt = f"""Question: {question}
+        answer_prompt = f"""Here is a detailed description of the image:
+{description}
+
+Now answer this question about the image:
+{question}
 
 Options:
 {opts}
 
-Image analysis notes:
-{description}
-
-Look at the image carefully. Think step by step. Answer with ONLY the option number (1, 2, 3, or 4) on the last line."""
+Think step by step, then give your final answer as ONLY the option number (1, 2, 3, or 4). Put your final answer on the last line."""
     else:
+        # Question-first for blank (improves counting accuracy)
         answer_prompt = f"""Question: {question}
 
 Image analysis notes:
