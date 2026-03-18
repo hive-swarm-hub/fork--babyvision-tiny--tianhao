@@ -48,11 +48,12 @@ def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
 
     model = os.environ.get("SOLVER_MODEL", "gpt-5.4-mini")
 
-    # Step 1: Describe the image
+    # Step 1: Describe the image (high detail for better perception)
+    hi_url = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}", "detail": "high"}}
     desc_response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": [
-            img_url,
+            hi_url,
             {"type": "text", "text": "Describe this image in detail. Focus on: the layout/grid structure, all visual elements (shapes, colors, patterns, numbers, letters), positions of elements, any differences or similarities between elements, and any spatial relationships. Be thorough and precise."},
         ]}],
         temperature=0,
@@ -63,8 +64,8 @@ def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
         desc_response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": [
-                img_url,
-                {"type": "text", "text": "Describe this image in detail. Focus on: the layout/grid structure, all visual elements (shapes, colors, patterns, numbers, letters), positions of elements, any differences or similarities between elements, and any spatial relationships. Be thorough and precise."},
+                hi_url,
+                {"type": "text", "text": "Describe this image in detail. Focus on layout, elements, positions, differences."},
             ]}],
             temperature=0,
             max_completion_tokens=300,
