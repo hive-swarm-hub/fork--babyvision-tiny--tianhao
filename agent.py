@@ -19,7 +19,6 @@ def load_image_b64(image_path: str, min_size: int = 768) -> str:
     """Load image, upscale if too small, return base64."""
     img = Image.open(image_path)
     w, h = img.size
-    # Upscale small images so the model can see more detail
     if max(w, h) < min_size:
         scale = min_size / max(w, h)
         img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
@@ -28,44 +27,55 @@ def load_image_b64(image_path: str, min_size: int = 768) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
+def extract_answer(raw_output, ans_type):
+    """Extract and clean the answer from model output."""
+    lines = [l.strip() for l in raw_output.split("\n") if l.strip()]
+    answer = lines[-1] if lines else raw_output
+    answer = re.sub(r'\s*,\s*', ',', answer)
+    answer = answer.rstrip('.')
+    if ans_type == "choice":
+        m = re.search(r'\b([0-4])\b', answer)
+        if m:
+            answer = m.group(1)
+    return answer
+
+
 def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
     client = OpenAI()
 
     img_b64 = load_image_b64(image_path)
+    img_url = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
 
     model = os.environ.get("SOLVER_MODEL", "gpt-5.4-mini")
 
-    # Step 1: Describe the image in detail
-    describe_messages = [
-        {"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-            {"type": "text", "text": "Describe this image in detail. Focus on: the layout/grid structure, all visual elements (shapes, colors, patterns, numbers, letters), positions of elements, any differences or similarities between elements, and any spatial relationships. Be thorough and precise."},
-        ]},
-    ]
-
+    # Step 1: Describe the image
     desc_response = client.chat.completions.create(
         model=model,
-        messages=describe_messages,
+        messages=[{"role": "user", "content": [
+            img_url,
+            {"type": "text", "text": "Describe this image in detail. Focus on: the layout/grid structure, all visual elements (shapes, colors, patterns, numbers, letters), positions of elements, any differences or similarities between elements, and any spatial relationships. Be thorough and precise."},
+        ]}],
         temperature=0,
         max_completion_tokens=512,
     )
     description = desc_response.choices[0].message.content
     if not description or not description.strip():
-        # Retry with shorter prompt when content is None (happens on token limit hit)
         desc_response = client.chat.completions.create(
             model=model,
-            messages=describe_messages,
+            messages=[{"role": "user", "content": [
+                img_url,
+                {"type": "text", "text": "Describe this image in detail. Focus on: the layout/grid structure, all visual elements (shapes, colors, patterns, numbers, letters), positions of elements, any differences or similarities between elements, and any spatial relationships. Be thorough and precise."},
+            ]}],
             temperature=0,
             max_completion_tokens=300,
         )
         description = desc_response.choices[0].message.content
     description = description.strip() if description else "(no description available)"
 
-    # Step 2: Answer
+    # Step 2: Two answer attempts with different prompt styles
     if ans_type == "choice" and options:
-        # Description-first for choice (preserves "2" bias which matches some answers)
         opts = "\n".join(f"{i+1}. {o}" for i, o in enumerate(options))
-        answer_prompt = f"""Here is a detailed description of the image:
+        prompt_a = f"""Here is a detailed description of the image:
 {description}
 
 Now answer this question about the image:
@@ -75,51 +85,71 @@ Options:
 {opts}
 
 Think step by step, then give your final answer as ONLY the option number (1, 2, 3, or 4). Put your final answer on the last line."""
+        # For choice, just use one attempt (model bias is consistent)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": [img_url, {"type": "text", "text": prompt_a}]}],
+            temperature=0,
+            max_completion_tokens=1024,
+        )
+        raw_output = response.choices[0].message.content.strip()
+        answer = extract_answer(raw_output, ans_type)
     else:
-        # Question-first for blank (improves counting accuracy)
-        answer_prompt = f"""Question: {question}
+        # For blank questions: try two different framings
+        prompt_a = f"""Question: {question}
 
 Image analysis notes:
 {description}
 
 Look at the image carefully. Think step by step. Give your final answer in the exact format requested. Put ONLY the answer value on the last line."""
 
-    answer_messages = [
-        {"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-            {"type": "text", "text": answer_prompt},
-        ]},
-    ]
+        prompt_b = f"""Here is a detailed description of the image:
+{description}
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=answer_messages,
-        temperature=0,
-        max_completion_tokens=1024,
-    )
+Now answer this question about the image:
+{question}
 
-    raw_output = response.choices[0].message.content.strip()
+Think step by step, then give your final answer in the exact format requested. Put your final answer on the last line, with ONLY the answer value and nothing else."""
 
-    # Extract the last line as the final answer
-    lines = [l.strip() for l in raw_output.split("\n") if l.strip()]
-    answer = lines[-1] if lines else raw_output
+        resp_a = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": [img_url, {"type": "text", "text": prompt_a}]}],
+            temperature=0,
+            max_completion_tokens=1024,
+        )
+        answer_a = extract_answer(resp_a.choices[0].message.content.strip(), ans_type)
 
-    # Clean up formatting
-    # Remove spaces after commas in coordinate-style answers
-    answer = re.sub(r',\s+', ',', answer)
-    # Remove spaces after hyphens in pair-style answers (like "1-F, 2-D" -> "1-F,2-D")
-    # But keep hyphens within pairs (1-F stays 1-F)
-    answer = re.sub(r'\s*,\s*', ',', answer)
-    # Strip any trailing period
-    answer = answer.rstrip('.')
+        resp_b = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": [img_url, {"type": "text", "text": prompt_b}]}],
+            temperature=0,
+            max_completion_tokens=1024,
+        )
+        answer_b = extract_answer(resp_b.choices[0].message.content.strip(), ans_type)
 
-    # For choice questions, extract just the number
-    if ans_type == "choice":
-        m = re.search(r'\b([0-4])\b', answer)
-        if m:
-            answer = m.group(1)
+        if answer_a == answer_b:
+            answer = answer_a
+            raw_output = resp_a.choices[0].message.content.strip()
+        else:
+            # Adjudicate: ask the model to pick between the two answers
+            adj_prompt = f"""Question: {question}
 
-    # Save trajectory if requested
+Two analyses produced different answers:
+Answer 1: {answer_a}
+Answer 2: {answer_b}
+
+Look at the image carefully. Which answer is correct? Reply with ONLY the correct answer value."""
+
+            adj_resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": [img_url, {"type": "text", "text": adj_prompt}]}],
+                temperature=0,
+                max_completion_tokens=64,
+            )
+            answer = extract_answer(adj_resp.choices[0].message.content.strip(), ans_type)
+            raw_output = f"A={answer_a} B={answer_b} ADJ={answer}"
+
+    # Save trajectory
     traj_dir = os.environ.get("EVAL_TRAJECTORY_DIR")
     idx = os.environ.get("EVAL_INDEX")
     if traj_dir and idx is not None:
@@ -134,14 +164,6 @@ Look at the image carefully. Think step by step. Give your final answer in the e
             "options": options,
             "raw_response": raw_output,
             "parsed_answer": answer,
-            "usage_describe": {
-                "prompt_tokens": desc_response.usage.prompt_tokens if desc_response.usage else None,
-                "completion_tokens": desc_response.usage.completion_tokens if desc_response.usage else None,
-            },
-            "usage_answer": {
-                "prompt_tokens": response.usage.prompt_tokens if response.usage else None,
-                "completion_tokens": response.usage.completion_tokens if response.usage else None,
-            },
         }
         with open(os.path.join(traj_dir, f"{idx}.json"), "w") as f:
             json.dump(trajectory, f, indent=2)
