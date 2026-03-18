@@ -10,7 +10,6 @@ import json
 import base64
 import re
 import io
-import time
 from collections import Counter
 
 from openai import OpenAI
@@ -29,12 +28,16 @@ def load_image_b64(image_path: str, min_size: int = 768) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def extract_blank(raw_output):
-    """Extract blank answer from last line."""
+def extract_answer(raw_output, ans_type):
+    """Extract and clean the answer from model output."""
     lines = [l.strip() for l in raw_output.split("\n") if l.strip()]
     answer = lines[-1] if lines else raw_output
     answer = re.sub(r'\s*,\s*', ',', answer)
     answer = answer.rstrip('.')
+    if ans_type == "choice":
+        m = re.search(r'\b([0-4])\b', answer)
+        if m:
+            answer = m.group(1)
     return answer
 
 
@@ -57,36 +60,17 @@ def extract_choice_letter(raw_output):
 
 
 def api_call(client, model, messages, temperature=0, max_tokens=1024):
-    """API call with retry on empty and rate limit backoff. seed=42 for temp=0 only."""
-    kwargs = dict(model=model, messages=messages,
-                  temperature=temperature, max_completion_tokens=max_tokens)
-    if temperature == 0:
-        kwargs["seed"] = 42
-    for attempt in range(3):
-        try:
-            resp = client.chat.completions.create(**kwargs)
-            content = resp.choices[0].message.content
-            if content and content.strip():
-                return content.strip()
-        except Exception:
-            time.sleep(2 ** attempt)
+    """API call with retry on empty."""
+    for _ in range(2):
+        resp = client.chat.completions.create(
+            model=model, messages=messages,
+            temperature=temperature, max_completion_tokens=max_tokens,
+            seed=42,
+        )
+        content = resp.choices[0].message.content
+        if content and content.strip():
+            return content.strip()
     return ""
-
-
-def is_grid_counting(question):
-    """Check if this is a grid-based counting problem suitable for grid transcription."""
-    q = question.lower()
-    if not any(w in q for w in ["how many", "count", "pass through"]):
-        return False
-    # Grid squares/patterns
-    if any(w in q for w in ["square", "pattern"]):
-        if any(w in q for w in ["3d", "block", "cube"]):
-            return False
-        return True
-    # Line through points (dot grid)
-    if "pass through" in q or ("point" in q and "line" in q):
-        return True
-    return False
 
 
 def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
@@ -98,46 +82,26 @@ def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
 
     model = os.environ.get("SOLVER_MODEL", "gpt-5.4-mini")
 
-    # Skip description API call (always returns empty with detail:high + 512 tokens)
-    # Keep desc_messages as conversation seed for multi-turn
-    description = "(no description available)"
+    # Step 1: Description (returns empty with detail:high + 512 tokens, acts as conversation seed)
     desc_messages = [{"role": "user", "content": [
         hi_url,
         {"type": "text", "text": "Describe this image in detail. Focus on: the layout/grid structure, all visual elements (shapes, colors, patterns, numbers, letters), positions of elements, any differences or similarities between elements, and any spatial relationships. Be thorough and precise."},
     ]}]
+    description = api_call(client, model, desc_messages, temperature=0, max_tokens=512)
+    if not description:
+        description = "(no description available)"
 
     if ans_type == "choice" and options:
-        answer, raw_output = solve_choice(client, model, question, options, description, img_url, desc_messages)
-    else:
-        answer, raw_output = solve_blank(client, model, question, description, img_url, hi_url, desc_messages)
+        # Choice: multi-turn with letter-based answers (junjie's approach)
+        n = len(options)
+        labels = ['A', 'B', 'C', 'D'][:n]
+        all_letters = all(len(o) == 1 and o in 'ABCD' for o in options)
 
-    # Save trajectory
-    traj_dir = os.environ.get("EVAL_TRAJECTORY_DIR")
-    idx = os.environ.get("EVAL_INDEX")
-    if traj_dir and idx is not None:
-        os.makedirs(traj_dir, exist_ok=True)
-        with open(os.path.join(traj_dir, f"{idx}.json"), "w") as f:
-            json.dump({
-                "index": int(idx), "model": model, "description": description,
-                "question": question, "image_path": image_path,
-                "ans_type": ans_type, "options": options,
-                "raw_response": raw_output, "parsed_answer": answer,
-            }, f, indent=2)
+        messages = list(desc_messages)
+        messages.append({"role": "assistant", "content": description})
 
-    return answer
-
-
-def solve_choice(client, model, question, options, description, img_url, desc_messages):
-    """Choice: multi-turn with letter-based answers, 5-vote majority at temp=0.3."""
-    n = len(options)
-    labels = ['A', 'B', 'C', 'D'][:n]
-    all_letters = all(len(o) == 1 and o in 'ABCD' for o in options)
-
-    messages = list(desc_messages)
-    messages.append({"role": "assistant", "content": description})
-
-    if all_letters:
-        answer_prompt = f"""Now answer this question about the image:
+        if all_letters:
+            answer_prompt = f"""Now answer this question about the image:
 {question}
 
 The options are shown in the image as {', '.join(labels)}.
@@ -145,9 +109,9 @@ The options are shown in the image as {', '.join(labels)}.
 First, describe what you see in EACH option ({', '.join(labels)}) separately and in detail.
 Then, explain step by step which option is correct and why, comparing each option against the requirements.
 Finally, give your final answer as ONLY a single letter ({', '.join(labels)}) on the last line."""
-    else:
-        opts = "\n".join(f"{labels[i]}. {o}" for i, o in enumerate(options))
-        answer_prompt = f"""Now answer this question about the image:
+        else:
+            opts = "\n".join(f"{labels[i]}. {o}" for i, o in enumerate(options))
+            answer_prompt = f"""Now answer this question about the image:
 {question}
 
 Options:
@@ -157,97 +121,173 @@ First, describe what you see for each option in detail.
 Then, explain step by step which option is correct and why.
 Finally, give your final answer as ONLY a single letter ({', '.join(labels)}) on the last line."""
 
-    messages.append({"role": "user", "content": [img_url, {"type": "text", "text": answer_prompt}]})
+        messages.append({"role": "user", "content": [img_url, {"type": "text", "text": answer_prompt}]})
+        raw_output = api_call(client, model, messages, temperature=0, max_tokens=1500)
+        answer = extract_choice_letter(raw_output)
 
-    # 5-vote majority at temp=0.3 for diversity
-    choice_votes = []
-    for _ in range(5):
-        raw = api_call(client, model, messages, temperature=0.3, max_tokens=1500)
-        choice_votes.append(extract_choice_letter(raw))
-    vote_counts = Counter(choice_votes)
-    answer = vote_counts.most_common(1)[0][0]
-    return answer, f"votes={choice_votes} picked={answer}"
+    else:
+        # Blank questions
+        prompt_a = f"""Question: {question}
 
+Image analysis notes:
+{description}
 
-def solve_blank(client, model, question, description, img_url, hi_url, desc_messages):
-    """Blank: grid transcription for grid counting, multi-turn+direct for other counting, dual-prompt for rest."""
-    q_lower = question.lower()
-    is_counting = any(w in q_lower for w in ["how many", "count"])
+Look at the image carefully. Think step by step. Give your final answer in the exact format requested. Put ONLY the answer value on the last line."""
 
-    # Grid transcription for 2D grid counting (squares, patterns)
-    if is_grid_counting(question):
-        grid_prompt = f"""Look at this image carefully. The question is: {question}
+        q_lower = question.lower()
+        is_counting = any(w in q_lower for w in ["how many", "count"])
+        # Grid counting: 2D grids with squares/patterns, or dot grids with lines
+        is_grid = is_counting and any(w in q_lower for w in ["square", "pattern", "pass through", "point"]) and not any(w in q_lower for w in ["3d", "block", "cube"])
+
+        if is_grid:
+            # Grid transcription: model marks grid cells/points, Python counts
+            if any(w in q_lower for w in ["pass through", "point"]):
+                grid_prompt = f"""Look at this image carefully. The question is: {question}
+
+The image shows dots arranged in a grid with lines connecting some of them. Your task: for EACH dot in the grid, write 'X' if the line passes through it, or '.' if it doesn't.
+
+Write the grid of dots row by row from top to bottom, left to right. Use 'X' for dots the line passes through, '.' for dots it doesn't.
+One row per line. Separate with spaces.
+
+Be very precise — trace the line carefully through each dot."""
+            else:
+                grid_prompt = f"""Look at this image carefully. The question is: {question}
 
 Your task: Transcribe the image as a grid/matrix. For EACH element in the image, write 'X' if it matches what needs to be counted, or '.' if it doesn't.
 
 Write the grid row by row. One row per line. Use only 'X' and '.' characters separated by spaces.
+Example format:
+. X . X .
+X X . . X
+. . X . .
+
 Be very precise — examine each cell/element carefully."""
 
-        grid_text = api_call(client, model,
-            [{"role": "user", "content": [img_url, {"type": "text", "text": grid_prompt}]}],
-            temperature=0, max_tokens=2048)
-        programmatic_count = grid_text.count('X')
-        if programmatic_count > 0:
-            return str(programmatic_count), f"GRID_COUNT={programmatic_count}\n{grid_text}"
+            grid_text = api_call(client, model, [{"role": "user", "content": [img_url, {"type": "text", "text": grid_prompt}]}], temperature=0, max_tokens=2048)
+            grid_count = grid_text.count('X') if grid_text else 0
 
-    if is_counting:
-        # Non-grid counting: combined multi-turn + direct, majority vote
-        all_answers = []
+            if grid_count > 0:
+                answer = str(grid_count)
+            else:
+                # Fallback to baseline
+                resp_a = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_a}]}],
+                    temperature=0.1,
+                    max_completion_tokens=1024,
+                )
+                answer = extract_answer(resp_a.choices[0].message.content.strip(), ans_type)
+            raw_output = f"GRID_COUNT={grid_count} PICKED={answer}\n---\n{grid_text}"
 
-        # Multi-turn systematic counting (3 samples)
-        count_msgs = [
-            {"role": "user", "content": [
-                img_url,
-                {"type": "text", "text": f"Look at this image carefully.\n\n{question}\n\nFirst, systematically locate and list each item you need to count, with its position (e.g., row and column). Be thorough — scan every row and column."},
-            ]},
-        ]
-        analysis = api_call(client, model, count_msgs, temperature=0, max_tokens=1024)
-        count_msgs.append({"role": "assistant", "content": analysis})
-        count_msgs.append({"role": "user", "content": "Now count your list carefully and give the total. Put ONLY the number on the last line."})
+        elif is_counting:
+            # Non-grid counting: combine multi-turn analysis + direct prompts, majority vote
+            all_answers = []
 
-        for _ in range(3):
-            raw = api_call(client, model, count_msgs, temperature=0.3, max_tokens=256)
-            all_answers.append(extract_blank(raw))
+            # Approach 1: Multi-turn systematic counting (3 samples)
+            count_msgs = [
+                {"role": "user", "content": [
+                    img_url,
+                    {"type": "text", "text": f"Look at this image carefully.\n\n{question}\n\nFirst, systematically locate and list each item you need to count, with its position (e.g., row and column). Be thorough — scan every row and column."},
+                ]},
+            ]
+            analysis = api_call(client, model, count_msgs, temperature=0, max_tokens=1024)
+            count_msgs.append({"role": "assistant", "content": analysis})
+            count_msgs.append({"role": "user", "content": "Now count your list carefully and give the total. Put ONLY the number on the last line."})
 
-        # Direct prompt (2 samples)
-        prompt_a = f"""Question: {question}\n\nLook at the image carefully. Think step by step. Put ONLY the answer value on the last line."""
-        raw_a = api_call(client, model,
-            [{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_a}]}],
-            temperature=0.1, max_tokens=1024)
-        all_answers.append(extract_blank(raw_a))
+            for _ in range(3):
+                resp = client.chat.completions.create(
+                    model=model, messages=count_msgs, temperature=0.3, max_completion_tokens=256,
+                    seed=42,
+                )
+                all_answers.append(extract_answer(resp.choices[0].message.content.strip(), ans_type))
 
-        prompt_b = f"""{question}\n\nIMPORTANT: Before giving your count, list each item with its position. Then total them up.\nPut ONLY the final count number on the last line."""
-        raw_b = api_call(client, model,
-            [{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_b}]}],
-            temperature=0.1, max_tokens=1024)
-        all_answers.append(extract_blank(raw_b))
+            # Approach 2: Direct prompts with detail:high (2 samples)
+            resp_a = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_a}]}],
+                temperature=0.1,
+                max_completion_tokens=1024,
+                seed=42,
+            )
+            all_answers.append(extract_answer(resp_a.choices[0].message.content.strip(), ans_type))
 
-        counts = Counter(all_answers)
-        answer = counts.most_common(1)[0][0]
-        return answer, f"samples={all_answers} picked={answer}"
+            prompt_count = f"""Image description: {description}
 
-    else:
-        # Non-counting blank: multi-turn + direct, prefer multi-turn
-        messages = list(desc_messages)
-        messages.append({"role": "assistant", "content": description})
-        messages.append({"role": "user", "content": [img_url, {"type": "text", "text": f"""{question}
+{question}
 
-Think step by step. Pay close attention to the exact format requested in the question.
-Give your final answer in the exact format requested. Put ONLY the answer value on the last line."""}]})
-        raw_a = api_call(client, model, messages, temperature=0, max_tokens=1024)
-        answer_a = extract_blank(raw_a)
+IMPORTANT: Before giving your count, list each item you're counting with its approximate position (e.g., "row 1: item at col 2, item at col 5"). Then total them up.
+Put ONLY the final count number on the last line."""
+            resp_b = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_count}]}],
+                temperature=0.1,
+                max_completion_tokens=1024,
+                seed=42,
+            )
+            all_answers.append(extract_answer(resp_b.choices[0].message.content.strip(), ans_type))
 
-        prompt_b = f"""Question: {question}\n\nImage analysis notes:\n{description}\n\nLook at the image carefully. Think step by step. Give your final answer in the exact format requested. Put ONLY the answer value on the last line."""
-        raw_b = api_call(client, model,
-            [{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_b}]}],
-            temperature=0, max_tokens=1024)
-        answer_b = extract_blank(raw_b)
+            counts = Counter(all_answers)
+            answer = counts.most_common(1)[0][0]
+            raw_output = f"samples={all_answers} picked={answer}"
+        else:
+            # Non-counting blank: dual prompts, prefer A
+            prompt_b = f"""Here is a detailed description of the image:
+{description}
 
-        if answer_a == answer_b:
-            return answer_a, raw_a
-        return answer_a, f"A={answer_a} B={answer_b} PICKED=A(multi-turn)"
+Now answer this question about the image:
+{question}
+
+Think step by step, then give your final answer in the exact format requested. Put your final answer on the last line, with ONLY the answer value and nothing else."""
+
+            resp_a = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_a}]}],
+                temperature=0.1,
+                max_completion_tokens=1024,
+                seed=42,
+            )
+            answer_a = extract_answer(resp_a.choices[0].message.content.strip(), ans_type)
+
+            resp_b = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_b}]}],
+                temperature=0.1,
+                max_completion_tokens=1024,
+                seed=42,
+            )
+            answer_b = extract_answer(resp_b.choices[0].message.content.strip(), ans_type)
+
+            if answer_a == answer_b:
+                answer = answer_a
+                raw_output = resp_a.choices[0].message.content.strip()
+            else:
+                answer = answer_a
+                raw_output = f"A={answer_a} B={answer_b} PICKED=A"
+
+    # Save trajectory
+    traj_dir = os.environ.get("EVAL_TRAJECTORY_DIR")
+    idx = os.environ.get("EVAL_INDEX")
+    if traj_dir and idx is not None:
+        os.makedirs(traj_dir, exist_ok=True)
+        trajectory = {
+            "index": int(idx),
+            "model": model,
+            "description": description,
+            "question": question,
+            "image_path": image_path,
+            "ans_type": ans_type,
+            "options": options,
+            "raw_response": raw_output,
+            "parsed_answer": answer,
+        }
+        with open(os.path.join(traj_dir, f"{idx}.json"), "w") as f:
+            json.dump(trajectory, f, indent=2)
+
+    return answer
 
 
 if __name__ == "__main__":
     data = json.loads(sys.stdin.read().strip())
     print(solve(data["question"], data["image_path"], data["ans_type"], data.get("options", [])))
+
+
