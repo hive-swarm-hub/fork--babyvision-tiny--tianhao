@@ -103,7 +103,16 @@ Image analysis notes:
 
 Look at the image carefully. Think step by step. Give your final answer in the exact format requested. Put ONLY the answer value on the last line."""
 
-        prompt_b = f"""Here is a detailed description of the image:
+        q_lower = question.lower()
+        if any(w in q_lower for w in ["how many", "count"]):
+            prompt_b = f"""Image description: {description}
+
+{question}
+
+IMPORTANT: Before giving your count, list each item you're counting with its approximate position (e.g., "row 1: item at col 2, item at col 5"). Then total them up.
+Put ONLY the final count number on the last line."""
+        else:
+            prompt_b = f"""Here is a detailed description of the image:
 {description}
 
 Now answer this question about the image:
