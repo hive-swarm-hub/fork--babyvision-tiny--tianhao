@@ -24,7 +24,7 @@ BabyVision Tiny is a 30-problem subset (seed=42) of BabyVision, testing fine-gra
 
 The agent receives images as base64 via the OpenAI vision API.
 
-**Note**: Requires a **vision model** (e.g., gpt-4o, gpt-4.1-mini). Set `SOLVER_MODEL` accordingly.
+**Note**: Requires a **vision model** (e.g., gpt-5.4-mini, gpt-4o). Set `SOLVER_MODEL` accordingly.
 
 ## Answer format
 
