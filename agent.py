@@ -89,7 +89,7 @@ Think step by step, then give your final answer as ONLY the option number (1, 2,
         # For choice, just use one attempt (model bias is consistent)
         response = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": [img_url, {"type": "text", "text": prompt_a}]}],
+            messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_a}]}],
             temperature=0,
             max_completion_tokens=1024,
         )
@@ -123,7 +123,7 @@ Think step by step, then give your final answer in the exact format requested. P
 
         resp_a = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": [img_url, {"type": "text", "text": prompt_a}]}],
+            messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_a}]}],
             temperature=0.1,
             max_completion_tokens=1024,
         )
@@ -131,7 +131,7 @@ Think step by step, then give your final answer in the exact format requested. P
 
         resp_b = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": [img_url, {"type": "text", "text": prompt_b}]}],
+            messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_b}]}],
             temperature=0.1,
             max_completion_tokens=1024,
         )
