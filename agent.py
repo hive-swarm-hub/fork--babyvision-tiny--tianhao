@@ -121,8 +121,15 @@ Then, explain step by step which option is correct and why.
 Finally, give your final answer as ONLY a single letter ({', '.join(labels)}) on the last line."""
 
         messages.append({"role": "user", "content": [img_url, {"type": "text", "text": answer_prompt}]})
-        raw_output = api_call(client, model, messages, temperature=0, max_tokens=1500)
-        answer = extract_choice_letter(raw_output)
+
+        # Run 3 attempts and take majority vote for stability
+        choice_votes = []
+        for _ in range(3):
+            raw = api_call(client, model, messages, temperature=0.2, max_tokens=1500)
+            choice_votes.append(extract_choice_letter(raw))
+        vote_counts = Counter(choice_votes)
+        answer = vote_counts.most_common(1)[0][0]
+        raw_output = f"votes={choice_votes} picked={answer}"
 
     else:
         # Blank questions
