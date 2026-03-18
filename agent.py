@@ -8,6 +8,7 @@ import sys
 import os
 import json
 import base64
+import re
 
 from openai import OpenAI
 
@@ -18,45 +19,101 @@ def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
     with open(image_path, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode()
 
-    if ans_type == "choice" and options:
-        opts = "\n".join(f"{i+1}. {o}" for i, o in enumerate(options))
-        prompt = f"{question}\n\nOptions:\n{opts}\n\nAnswer with ONLY the option number (1, 2, 3, or 4)."
-    else:
-        prompt = f"{question}\n\nGive ONLY the answer, nothing else."
+    model = os.environ.get("SOLVER_MODEL", "gpt-5.4-mini")
 
-    messages = [
+    # Step 1: Describe the image in detail
+    describe_messages = [
         {"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-            {"type": "text", "text": prompt},
+            {"type": "text", "text": "Describe this image in detail. Focus on: the layout/grid structure, all visual elements (shapes, colors, patterns, numbers, letters), positions of elements, any differences or similarities between elements, and any spatial relationships. Be thorough and precise."},
         ]},
     ]
 
-    model = os.environ.get("SOLVER_MODEL", "gpt-5.4-mini")
+    desc_response = client.chat.completions.create(
+        model=model,
+        messages=describe_messages,
+        temperature=0,
+        max_completion_tokens=1024,
+    )
+    description = desc_response.choices[0].message.content.strip()
+
+    # Step 2: Answer using the description + image
+    if ans_type == "choice" and options:
+        opts = "\n".join(f"{i+1}. {o}" for i, o in enumerate(options))
+        answer_prompt = f"""Here is a detailed description of the image:
+{description}
+
+Now answer this question about the image:
+{question}
+
+Options:
+{opts}
+
+Think step by step, then give your final answer as ONLY the option number (1, 2, 3, or 4). Put your final answer on the last line."""
+    else:
+        answer_prompt = f"""Here is a detailed description of the image:
+{description}
+
+Now answer this question about the image:
+{question}
+
+Think step by step, then give your final answer in the exact format requested. Put your final answer on the last line, with ONLY the answer value and nothing else."""
+
+    answer_messages = [
+        {"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+            {"type": "text", "text": answer_prompt},
+        ]},
+    ]
+
     response = client.chat.completions.create(
         model=model,
-        messages=messages,
+        messages=answer_messages,
         temperature=0,
-        max_completion_tokens=64,
+        max_completion_tokens=1024,
     )
 
     raw_output = response.choices[0].message.content.strip()
+
+    # Extract the last line as the final answer
+    lines = [l.strip() for l in raw_output.split("\n") if l.strip()]
+    answer = lines[-1] if lines else raw_output
+
+    # Clean up formatting
+    # Remove spaces after commas in coordinate-style answers
+    answer = re.sub(r',\s+', ',', answer)
+    # Remove spaces after hyphens in pair-style answers (like "1-F, 2-D" -> "1-F,2-D")
+    # But keep hyphens within pairs (1-F stays 1-F)
+    answer = re.sub(r'\s*,\s*', ',', answer)
+    # Strip any trailing period
+    answer = answer.rstrip('.')
+
+    # For choice questions, extract just the number
+    if ans_type == "choice":
+        m = re.search(r'\b([0-4])\b', answer)
+        if m:
+            answer = m.group(1)
 
     # Save trajectory if requested
     traj_dir = os.environ.get("EVAL_TRAJECTORY_DIR")
     idx = os.environ.get("EVAL_INDEX")
     if traj_dir and idx is not None:
         os.makedirs(traj_dir, exist_ok=True)
-        # For trajectory, save text prompt only (not the base64 image — too large)
         trajectory = {
             "index": int(idx),
             "model": model,
-            "prompt": prompt,
+            "description": description,
             "question": question,
             "image_path": image_path,
             "ans_type": ans_type,
             "options": options,
             "raw_response": raw_output,
-            "usage": {
+            "parsed_answer": answer,
+            "usage_describe": {
+                "prompt_tokens": desc_response.usage.prompt_tokens if desc_response.usage else None,
+                "completion_tokens": desc_response.usage.completion_tokens if desc_response.usage else None,
+            },
+            "usage_answer": {
                 "prompt_tokens": response.usage.prompt_tokens if response.usage else None,
                 "completion_tokens": response.usage.completion_tokens if response.usage else None,
             },
@@ -64,7 +121,7 @@ def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
         with open(os.path.join(traj_dir, f"{idx}.json"), "w") as f:
             json.dump(trajectory, f, indent=2)
 
-    return raw_output
+    return answer
 
 
 if __name__ == "__main__":
