@@ -47,9 +47,13 @@ def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
         model=model,
         messages=describe_messages,
         temperature=0,
-        max_completion_tokens=1024,
+        max_completion_tokens=512,
     )
-    description = desc_response.choices[0].message.content.strip()
+    description = desc_response.choices[0].message.content
+    if description:
+        description = description.strip()
+    else:
+        description = "(no description available)"
 
     # Step 2: Answer using the description + image
     if ans_type == "choice" and options:
