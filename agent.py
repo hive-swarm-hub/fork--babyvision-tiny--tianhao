@@ -122,10 +122,10 @@ Finally, give your final answer as ONLY a single letter ({', '.join(labels)}) on
 
         messages.append({"role": "user", "content": [img_url, {"type": "text", "text": answer_prompt}]})
 
-        # Run 3 attempts and take majority vote for stability
+        # Run 5 attempts and take majority vote for stability
         choice_votes = []
-        for _ in range(3):
-            raw = api_call(client, model, messages, temperature=0.2, max_tokens=1500)
+        for _ in range(5):
+            raw = api_call(client, model, messages, temperature=0.3, max_tokens=1500)
             choice_votes.append(extract_choice_letter(raw))
         vote_counts = Counter(choice_votes)
         answer = vote_counts.most_common(1)[0][0]
