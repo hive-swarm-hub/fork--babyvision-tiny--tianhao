@@ -124,7 +124,7 @@ Think step by step, then give your final answer in the exact format requested. P
         resp_a = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": [img_url, {"type": "text", "text": prompt_a}]}],
-            temperature=0,
+            temperature=0.1,
             max_completion_tokens=1024,
         )
         answer_a = extract_answer(resp_a.choices[0].message.content.strip(), ans_type)
@@ -132,7 +132,7 @@ Think step by step, then give your final answer in the exact format requested. P
         resp_b = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": [img_url, {"type": "text", "text": prompt_b}]}],
-            temperature=0,
+            temperature=0.1,
             max_completion_tokens=1024,
         )
         answer_b = extract_answer(resp_b.choices[0].message.content.strip(), ans_type)
