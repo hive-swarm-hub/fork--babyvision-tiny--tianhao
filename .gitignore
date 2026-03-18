@@ -3,3 +3,4 @@ run.log
 results.tsv
 .hive/
 __pycache__/
+eval_results/
